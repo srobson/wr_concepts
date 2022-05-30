@@ -1,5 +1,7 @@
 \documentclass[]{article}
 
+% Compile me with xelatex. It has proper support for UTF-8, Truetype and OpenType fonts out the box
+
 \usepackage{graphicx}
 \usepackage{subcaption}
 \usepackage[hidelinks]{hyperref}
@@ -20,7 +22,8 @@
 \usepackage{float}
 \usepackage{csvsimple} % Pull CSV files in to generate tables
 \usepackage{listings} % Include for easy code listings
-\usepackage[load=prefixed,load=abbr]{siunitx} % Simple SI units
+%\usepackage[alsoload=prefixed,abbr]{siunitx} % Simple SI units
+\usepackage{siunitx} % Simple SI units
 
 \geometry{a4paper,total={170mm,257mm},left=25mm,top=25mm,bottom=30mm}
 \parindent=0pt % disables indentation
@@ -28,6 +31,7 @@
 \definecolor{codegreen}{HTML}{008000}
 \definecolor{codepurp}{HTML}{881280}
 \definecolor{codeblue}{HTML}{1A1AA6}
+\definecolor{codeyellow}{HTML}{D6AD00}
 
 \lstdefinestyle{octavestyle}{
     %backgroundcolor=\color{backcolour},
@@ -47,6 +51,31 @@
     showstringspaces=false,
     showtabs=false,
     tabsize=2
+}
+
+\lstdefinestyle{hdlstyle}{
+	%backgroundcolor=\color{backcolour},
+	commentstyle=\color{codegreen},
+	%keywordstyle=\color{magenta},
+	numberstyle=\tiny\color{gray},
+	stringstyle=\color{gray},
+	%basicstyle=\ttfamily\footnotesize,
+	basicstyle=\ttfamily\tiny,
+	breakatwhitespace=false,
+	breaklines=true,
+	captionpos=b,
+	keepspaces=true,
+	%numbers=left,
+	numbersep=5pt,
+	showspaces=false,
+	showstringspaces=false,
+	showtabs=false,
+	tabsize=2,
+	emph={catch, do, for, if, else, elsif, switch, synchronized, while, try, then},
+	emphstyle=\color{codeblue},
+	% Keyword highlighting
+	%morekeywords={and,or},
+	%otherkeywords={and,or},keywordstyle = \color{codeyellow},
 }
 
 \lstdefinestyle{xmlstyle}{
@@ -124,7 +153,7 @@ Overview of D-TACQ implementation of White Rabbit timing system, including clock
 	\begin{itemize}
 		\item Timed series of pulses, user programmed by STL.
 	\end{itemize}
-	\item STL : Signal Transition List
+	\item STL : State Transition List
 	\item WR Core Clock
 	\begin{itemize}
 		\item 250 MHz clock from the WR Core.
@@ -159,7 +188,7 @@ Overview of D-TACQ implementation of White Rabbit timing system, including clock
 \section{Pulse per Second - PPS}
 \subsection{Front Panel Outputs - acq400sync.opi}
 \begin{itemize}
-	\item SYNC.d0 carries the processed, 1 TIGA clock period wide, version of PPS. Not for customer use.
+	\item SYNC.d0 carries the processed, 1 Si5326/TIGA clock period wide, version of PPS. Not for customer use.
 	\item SYNC.d1 carries the raw, 20 ms wide,  PPS pulse direct from the WR PTP Core. This is the true PPS which should be used for all comparisons, e.g. on scope measurements.
 \end{itemize}
 
@@ -194,7 +223,14 @@ We also take a copy of the WR PPS in order to provide synchronous divide on PG C
 \textcolor{red}{We're specifying a fixed number of clock speeds for use as the box-wide WR clock driven from the Si5326. Typically 10, 20, 40 MHz}
 
 \subsection{Synchronous Clock Divide on ADC Sites}
-\textcolor{red}{Use the PPS on the sync bus to control clock divider reset. This allows us to divide the WR clock (10s of MHz) down to a speed that's suitable for the ADC}
+\textcolor{red}{Use the PPS on the sync bus (SYNC.d0, the narrow,processed version) to control clock divider reset. This allows us to divide the WR clock (10s of MHz) down to a speed that's suitable for the ADC}
+
+\begin{center}\begin{lstlisting}[language=vhdl,style=hdlstyle]
+if RESYNC_CLKDIV_COUNTER = '1' and HW_SYNC_EN = '0' then            -- Reset counter when Trigger Divider Synchronisation is detected disable when using PPS sync
+	CLKDIV_COUNTER  <=  x"0002";                                      -- 1 clk_SEL pipeline for Trigger Divider Synchronisation
+elsif HW_SYNC_d0 = '1' and HW_SYNC_d1 = '0' and HW_SYNC_EN = '1' and ADC_ENABLE = '0' then  -- Preload pipeline on PPS and Before running the ADC
+	CLKDIV_COUNTER  <= x"0002";
+\end{lstlisting}\end{center}
 
 \section{WR Trigger}
 \subsection{Theory of Operation}
@@ -215,7 +251,91 @@ We also take a copy of the WR PPS in order to provide synchronous divide on PG C
 
 
 \subsection{WRTD ID Labels}
+
+\subsection{Accounting for 1 Clock delay in Counter Comparison}
+
+The process that compares the current TAI value with our requested trigger time is a clocked process. This results in a 1 tick delay before WRTT goes high.
+
+\begin{lstlisting}[language=vhdl,style=hdlstyle]
+THE_WR_TRIGGER_GEN: process(SI5326_CLK)
+begin
+if Rising_Edge(SI5326_CLK) then
+	for i in 0 to 1 loop
+		if WR_TIME_TRIG_ON_COUNT(i) = x"ff" then
+			WR_TIME_TRIG(i) <= '0';
+		elsif s_TAI_TRIGGER_ENABLE(i) = '1' and TAI_TRIGGER_DATA(i)(30 downto 0) = "111" & x"fffffff" then -- Make this a constant... For "instant" trigger support
+			WR_TIME_TRIG(i) 	<= '1';
+		elsif s_TAI_TRIGGER_ENABLE(i) = '1' and TAI_CURRENT_LOW_DATA(2 downto 0) = TAI_TRIGGER_DATA(i)(30 downto 28)  and SI5326_COUNTER =  TAI_TRIGGER_DATA(i)(27 downto 0) then
+			WR_TIME_TRIG(i) 	<= '1';
+		end if;
+\end{lstlisting}
+
+\begin{figure}[H]
+	\begin{subfigure}{0.5\textwidth}
+		\includegraphics[width=0.9\linewidth]{images/wrtt_on_next_second}
+		\caption{\texttt{set.site 11 wrtd\_txi --on\_next\_second=1}}
+		%\label{fig:cal_setup}
+	\end{subfigure}
+	\begin{subfigure}{0.5\textwidth}
+		\includegraphics[width=0.9\linewidth]{images/wrtt_on_next_second_less_1_tick}
+		\caption{\texttt{set.site 11 wrtd\_txa --at=+0:999999975}}
+		%\label{fig:cal_setup_photo}
+	\end{subfigure}
+	
+	\caption{Comparing WRTTs with different offsets from PPS. (40 MHz ticks = 25ns)}
+	\label{wrtt_vs_pps}
+\end{figure}
+
+The roughly 10ns between the rising edge of the clock and the WRTT signal can be disregarded. This is caused by differences in the routing delays to bring the signals off chip. Internally, within the FPGA, these two points are simultaneous.\\
+
+\subsubsection{Using Early PPS to better align WRTTs and Si version of PPS}
+
+Perhaps we should have software account for this globally by always subtracting 1 from the nominal timestamp contained in the WRTD packet during creation. Better yet let's try using an early version of the PPS to drive the internal tick counter and to generate the '1 Si5326 clock wide pulse' version of PPS.
+
+\begin{figure}[H]
+	\centering
+	\includegraphics[height=0.4\textwidth]{images/using_early_PPS}
+	\caption{Using Early PPS allows us to remove +1 error in WRTT and Si PPS}
+	\label{fig:early_pps}
+\end{figure}
+
+Importantly this only applies to WRTT and Si PPS generation. We still use the true PPS for tuning the Si clock phase and for output to the front panel for use in commissioning/calibration. This change will affect the pipeline of the clock divider reset in the Master Logic.
+
 \subsection{Accounting for Digitizer Trigger Setup Time and Multi-Rate Systems}
+\subsubsection{Digitizer Trigger Setup Time}
+
+Each D-TACQ digitiser requires a minimum setup time for a trigger with respect to the clock in order to be recognised for that particular sample. \textit{The WRTT software automatically programs the local timer to allow for this “setup” time which is normally 100nS.}\\
+
+Timing is absolute, every sample will occur at a defined time. Synchronisation is by PPS, this requires an integer number of samples per second.\\
+
+E.g. if time is 14:47:02 :\\
+
+\begin{minipage}[c]{0.5\textwidth}
+	Digitiser A, running at 1 kHz, will sample at\\14:47:02.000\\14:47:02.001\\14:47:02.002 etc.
+\end{minipage}
+\begin{minipage}[c]{0.5\textwidth}
+	Digitiser B, running a 400 kHz, will sample at\\14:47:02.0000000\\14:47:02.0000025\\14:47:02.0000050 etc.
+\end{minipage}\\\\
+
+Since the time base is absolute sample time is therefore always deterministic when a digitiser will sample. This allows the White Rabbit Trigger Time (WRTT) to be calculated to determine a guaranteed time for synchronous triggering across a network of digitisers.
+
+\begin{figure}[H]
+	\begin{subfigure}{0.5\textwidth}
+		\includegraphics[width=0.9\linewidth]{images/better_wrtt_on_next_second_less_100ns}
+		\caption{\texttt{set.site 11 wrtd\_txa --at=+0:999999900}\\Early WRTT incorporating the ADC trigger setup time.}
+		%\label{fig:cal_setup_photo}
+	\end{subfigure}
+	\begin{subfigure}{0.5\textwidth}
+		\includegraphics[width=0.9\linewidth]{images/better_wrtt_on_next_second}
+		\caption{\texttt{set.site 11 wrtd\_txi --on\_next\_second=1}\\WRTT arrives too late to be seen by 1st clock edge.}
+		%\label{fig:cal_setup}
+	\end{subfigure}
+	
+	\caption{Demonstration that failure to incorporate ADC trigger setup time in our WRTD message will result in a system that triggers 1 clock later than intended.}
+	\label{adc_trig_setup_wrtt}
+\end{figure}
+
+\subsubsection{Multi-Rate Systems}
 
 \pagebreak
 \section{TAI in SPAD}
